@@ -1,0 +1,36 @@
+{
+  "name": "hp-workflow",
+  "version": "1.0.0",
+  "description": "自動HP改善提案システム - 名刺情報から企業HPを分析し改善案を生成",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "normalize": "node scripts/normalize.js",
+    "resolve": "node scripts/resolve-website.js",
+    "crawl": "node scripts/crawl.js",
+    "psi": "node scripts/psi-analyze.js",
+    "lighthouse": "bash scripts/lighthouse-run.sh",
+    "quality": "node scripts/quality-gate.js"
+  },
+  "keywords": [
+    "hp",
+    "website",
+    "analysis",
+    "n8n",
+    "lighthouse",
+    "psi"
+  ],
+  "author": "tontoon99",
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.40.0",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.0",
+    "csv-parse": "^5.5.0",
+    "crypto": "^1.0.1"
+  },
+  "devDependencies": {
+    "lighthouse": "^11.0.0",
+    "@types/node": "^20.0.0"
+  }
+}
