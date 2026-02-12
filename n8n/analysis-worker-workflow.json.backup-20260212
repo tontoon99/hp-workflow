@@ -1,0 +1,158 @@
+{
+  "name": "hp-workflow-analysis-worker",
+  "nodes": [
+    {
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        220,
+        280
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "resolve-website",
+      "name": "Resolve Website",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        470,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/resolve-website",
+        "sendBody": true,
+        "specifyBody": "json"
+      }
+    },
+    {
+      "id": "crawl-site",
+      "name": "Crawl Site",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        730,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/crawl",
+        "sendBody": true,
+        "specifyBody": "json"
+      }
+    },
+    {
+      "id": "psi-mobile",
+      "name": "PSI Mobile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        990,
+        160
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+      }
+    },
+    {
+      "id": "psi-desktop",
+      "name": "PSI Desktop",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        990,
+        400
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+      }
+    },
+    {
+      "id": "save-content-lock",
+      "name": "Save Content Lock",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1250,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/content-lock",
+        "sendBody": true,
+        "specifyBody": "json"
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Resolve Website",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Website": {
+      "main": [
+        [
+          {
+            "node": "Crawl Site",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crawl Site": {
+      "main": [
+        [
+          {
+            "node": "PSI Mobile",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "PSI Desktop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PSI Mobile": {
+      "main": [
+        [
+          {
+            "node": "Save Content Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PSI Desktop": {
+      "main": [
+        [
+          {
+            "node": "Save Content Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

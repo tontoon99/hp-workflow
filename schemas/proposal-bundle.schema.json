@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hp-workflow.local/schemas/proposal-bundle.schema.json",
+  "title": "Proposal Bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "company_id",
+    "comparison_url",
+    "variants",
+    "delta_summary"
+  ],
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "comparison_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "variants": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "preview_url",
+          "goal"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "variant-a",
+              "variant-b",
+              "variant-c"
+            ]
+          },
+          "preview_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "goal": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "delta_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "performance_delta",
+        "accessibility_delta",
+        "seo_delta"
+      ],
+      "properties": {
+        "performance_delta": {
+          "type": "number"
+        },
+        "accessibility_delta": {
+          "type": "number"
+        },
+        "seo_delta": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}

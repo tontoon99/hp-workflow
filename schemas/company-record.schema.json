@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hp-workflow.local/schemas/company-record.schema.json",
+  "title": "Company Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "company_id",
+    "company_name",
+    "input_source",
+    "status",
+    "contacts",
+    "website_resolution"
+  ],
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "company_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_source": {
+      "type": "string",
+      "enum": [
+        "wantedly_people_csv"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "new",
+        "resolved_pending",
+        "resolved_confirmed",
+        "analysis_running",
+        "analysis_ready",
+        "content_locked",
+        "build_running",
+        "quality_failed",
+        "quality_passed",
+        "proposal_ready",
+        "sent",
+        "manual_review_required"
+      ]
+    },
+    "contacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "email"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "website_resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "official_website",
+        "resolution_confidence",
+        "evidence"
+      ],
+      "properties": {
+        "official_website": {
+          "type": "string",
+          "format": "uri"
+        },
+        "resolution_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "value"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "enum": [
+                  "business_card_url",
+                  "email_domain",
+                  "address_phone_match",
+                  "web_search"
+                ]
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

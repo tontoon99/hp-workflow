@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hp-workflow.local/schemas/content-inventory.schema.json",
+  "title": "Content Inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "company",
+    "content_lock",
+    "sections"
+  ],
+  "properties": {
+    "company": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "official_url"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "official_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "address": {
+          "type": "string"
+        },
+        "phone": {
+          "type": "string"
+        }
+      }
+    },
+    "content_lock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "allow",
+        "deny",
+        "text_hashes"
+      ],
+      "properties": {
+        "policy": {
+          "type": "string",
+          "const": "no_new_text"
+        },
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "reorder",
+              "layout_change",
+              "typography_change",
+              "whitespace_change"
+            ]
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "add_claims",
+              "delete_sections",
+              "rewrite_body"
+            ]
+          }
+        },
+        "text_hashes": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        }
+      }
+    },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "headline"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "headline": {
+            "type": "string"
+          },
+          "subhead": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "body": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "cta_label": {
+            "type": "string"
+          },
+          "cta_href": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

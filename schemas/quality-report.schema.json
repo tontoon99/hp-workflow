@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hp-workflow.local/schemas/quality-report.schema.json",
+  "title": "Quality Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "company_id",
+    "variant",
+    "scores",
+    "gates",
+    "passed"
+  ],
+  "properties": {
+    "company_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "variant": {
+      "type": "string",
+      "enum": [
+        "variant-a",
+        "variant-b",
+        "variant-c"
+      ]
+    },
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "performance",
+        "accessibility",
+        "best_practices",
+        "seo"
+      ],
+      "properties": {
+        "performance": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "accessibility": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "best_practices": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "seo": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content_lock_ok",
+        "links_ok",
+        "heading_structure_ok"
+      ],
+      "properties": {
+        "content_lock_ok": {
+          "type": "boolean"
+        },
+        "links_ok": {
+          "type": "boolean"
+        },
+        "heading_structure_ok": {
+          "type": "boolean"
+        }
+      }
+    },
+    "failure_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "passed": {
+      "type": "boolean"
+    }
+  }
+}

@@ -1,0 +1,161 @@
+# 実装前レビュー（2026-02-11）
+
+## 結論（先に要点）
+この設計は方向性は正しいです。  
+ただし、**このまま実装開始すると事故率が高い箇所があるため、条件付きGO**です。
+
+着手前の必須条件:
+1. n8nの実運用バージョンと構成（Postgres/Redis）を確定
+2. 決済後開始かつ即時決済のみで開始する条件を固定
+3. レビューゲート（R1-R4）をWaitノード基盤で実装方式まで確定
+4. HP特定APIの一次/二次ソース判定ロジックを固定
+
+---
+
+## 判定サマリー（ワークフロー別）
+
+### 1. 名刺取り込み -> 無料比較ページ送付
+- 判定: **GO**
+- 使うもの:
+  - Wantedly People（名刺読み取り）
+  - People Premium CSVエクスポート
+  - n8n Webhook + HTTP Request
+- 最新確認:
+  - 名刺は最大10枚同時読み取り可能（Wantedlyヘルプ）
+  - CSVダウンロードはPeople Premiumが必要（Wantedlyヘルプ）
+- 実装メモ:
+  - 取り込み時点で重複判定（会社名+ドメイン+電話）を必須化
+
+### 2. 比較ページ提示 -> 顧客が納得 -> 決済
+- 判定: **条件付きGO**
+- 使うもの:
+  - Stripe Payment Links または Checkout Session
+  - Stripe Webhook（`checkout.session.completed`）
+  - n8n Webhook Trigger
+- 最新確認:
+  - Payment Link完了イベントで`checkout.session.completed`を受信できる
+  - 支払い方法によっては確定まで2-14日かかるものがある（Stripe公式）
+- 実装メモ:
+  - MVPはカード等の即時決済のみで開始
+  - 決済完了前に詳細分析は開始しない
+  - Webhookを唯一の正式トリガーにする（画面リダイレクトだけに依存しない）
+
+### 3. 決済後の詳細分析（HP調査・監査）
+- 判定: **条件付きGO**
+- 使うもの:
+  - Playwright（クロール）
+  - Google PageSpeed Insights API v5
+  - Lighthouse（外部ワーカー）
+- 最新確認:
+  - PSI `runPagespeed` は `url` 必須、`strategy` と `category` 指定可能
+  - LighthouseはCLI/DevTools/PSIで実行可能
+- 実装メモ:
+  - n8n内シェル直実行は使わない（ExecuteCommandはv2でデフォルト無効）
+  - 監査は外部サービスをHTTPで呼ぶ
+
+### 4. 3案生成 -> 品質ゲート -> 最終比較ページ
+- 判定: **条件付きGO**
+- 使うもの:
+  - LLM API（brief/token生成）
+  - テンプレートビルドサービス
+  - QAサービス（content lock / links / headings / Lighthouse）
+- 最新確認:
+  - n8nでAnthropic資格情報/ノード利用可
+  - HTTP Requestノードで外部API接続は標準運用
+- 実装メモ:
+  - `content lock`差分が出たら公開停止
+  - 品質NG時の再ビルド分岐を必須化
+
+### 5. 人レビュー（R1-R4）を挟んだ送信
+- 判定: **GO（実装方式の明確化が必要）**
+- 使うもの:
+  - n8n Waitノード（Webhook再開 or Form提出再開）
+  - 必要に応じてSlack通知
+- 最新確認:
+  - WaitノードはWebhook呼び出し/フォーム送信で再開可能
+  - WebhookはTest/Production URLの使い分けが必要
+- 実装メモ:
+  - `manual approval`専用ノード前提ではなく、Wait+承認画面で設計する
+
+### 6. HP特定（検索依存部分）
+- 判定: **条件付きGO**
+- 使うもの:
+  - 名刺URL、メールドメイン、住所/電話一致
+  - 検索APIは最終手段
+- 最新確認:
+  - Bing Search APIは**2025-08-11**に廃止済み
+  - Google Custom Search JSON APIは継続利用可能
+  - Custom Search Site Restricted JSON APIは**2025-01-08**で停止済み
+- 実装メモ:
+  - 一次判定を名刺情報ベースに寄せる
+  - 検索APIは補助として使う
+
+---
+
+## セキュリティ/運用レビュー
+
+1. n8n 2.x系のセキュリティ方針（ExecuteCommand既定無効）に沿う設計は妥当。  
+2. Queue modeはPostgres + Redis推奨で、SQLite運用は非推奨。  
+3. 過去のRCE系アドバイザリがあるため、ワークフロー編集権限は最小化必須。  
+
+---
+
+## 法務/送信レビュー（実装前確認）
+
+1. 名刺交換起点の連絡には一定の予測可能性がある整理（PPC FAQ）。  
+2. ただし広告宣伝メールは特定電子メール法の規制対象（オプトイン/拒否対応等）。  
+3. 初回は「お礼 + 比較ページ」の軽い通知、以後は反応者中心に運用する。  
+
+---
+
+## 実装着手のGo条件（チェックリスト）
+
+- [ ] Stripeで即時決済限定の設定を完了
+- [ ] `checkout.session.completed` webhook受信テスト完了
+- [ ] Waitノードを使ったR1-R4承認導線をプロトタイプで確認
+- [ ] PSI/Lighthouseの外部ワーカーAPI疎通確認
+- [ ] HP特定スコア基準（自動確定0.85）を固定
+- [ ] Queue mode構成（Postgres/Redis）を確定
+
+---
+
+## 参照ソース（最終確認日: 2026-02-11）
+- Wantedly 名刺読み取り方法（最大10枚）  
+  https://help.wantedly.com/hc/ja/articles/360025061512-%E5%90%8D%E5%88%BA%E3%81%AE%E8%AA%AD%E3%81%BF%E5%8F%96%E3%82%8A%E6%96%B9%E6%B3%95
+- Wantedly 名刺データCSVダウンロード（People Premium）  
+  https://help.wantedly.com/hc/ja/articles/115001845683-%E5%90%8D%E5%88%BA%E3%83%87%E3%83%BC%E3%82%BF%E3%82%92%E3%83%80%E3%82%A6%E3%83%B3%E3%83%AD%E3%83%BC%E3%83%89%E3%81%97%E3%81%9F%E3%81%84
+- Stripe Payment Links API  
+  https://docs.stripe.com/payment-links/api
+- Stripe Checkout fulfillment（`checkout.session.completed`）  
+  https://docs.stripe.com/checkout/fulfillment
+- Stripe Checkout lifecycle  
+  https://docs.stripe.com/payments/checkout/how-checkout-works
+- PSI runPagespeed API v5  
+  https://developers.google.com/speed/docs/insights/rest/v5/pagespeedapi/runpagespeed
+- Lighthouse docs  
+  https://developer.chrome.com/docs/lighthouse
+- n8n v2.0 breaking changes  
+  https://docs.n8n.io/2-0-breaking-changes/
+- n8n queue mode  
+  https://docs.n8n.io/hosting/scaling/queue-mode/
+- n8n Security Advisory（例）  
+  https://github.com/n8n-io/n8n/security/advisories/GHSA-7jv6-5mx2-4rw2
+- n8n Wait node  
+  https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.wait/
+- n8n Webhook node  
+  https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/
+- n8n HTTP Request node  
+  https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/
+- n8n Stripe credentials / trigger  
+  https://docs.n8n.io/integrations/builtin/credentials/stripe/  
+  https://docs.n8n.io/integrations/builtin/trigger-nodes/n8n-nodes-base.stripetrigger/
+- Bing Search API retirement（2025-08-11）  
+  https://learn.microsoft.com/en-us/lifecycle/announcements/bing-search-api-retirement
+- Google Custom Search JSON API overview  
+  https://developers.google.com/custom-search/v1/overview
+- Custom Search Site Restricted JSON API停止（2025-01-08）  
+  https://developers.google.com/custom-search/v1/site_restricted_api
+- PPC FAQ（名刺交換後の連絡）  
+  https://www.ppc.go.jp/all_faq_index/faq1-q4-16
+- 消費者庁 特定電子メール法  
+  https://www.caa.go.jp/policies/policy/consumer_transaction/specifed_email/

@@ -1,0 +1,33 @@
+#!/usr/bin/env node
+
+const fs = require("fs");
+const path = require("path");
+
+const requiredFiles = [
+  "docs/HP自動生成ワークフロー設計.md",
+  "docs/architecture.md",
+  "docs/workflow-state-machine.md",
+  "n8n/ingest-workflow.json",
+  "n8n/analysis-worker-workflow.json",
+  "n8n/build-worker-workflow.json",
+  "schemas/content-inventory.schema.json"
+];
+
+const main = () => {
+  try {
+    const repoRoot = path.join(__dirname, "..");
+    const missing = requiredFiles.filter((filePath) => {
+      const fullPath = path.join(repoRoot, filePath);
+      return !fs.existsSync(fullPath);
+    });
+    if (missing.length > 0) {
+      throw new Error(`missing required files: ${missing.join(", ")}`);
+    }
+    process.stdout.write("workflow structure check passed\n");
+  } catch (error) {
+    fs.writeSync(process.stderr.fd, `test-workflow failed: ${error.message}\n`);
+    process.exit(1);
+  }
+};
+
+main();

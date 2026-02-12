@@ -1,0 +1,607 @@
+{
+  "name": "hp-workflow-stripe-webhook",
+  "nodes": [
+    {
+      "id": "stripe-webhook",
+      "name": "Stripe Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        180,
+        380
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hp-stripe-events",
+        "responseMode": "lastNode",
+        "options": {
+          "rawBody": true,
+          "responseData": "allEntries"
+        }
+      }
+    },
+    {
+      "id": "verify-stripe-signature",
+      "name": "Verify Stripe Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        450,
+        380
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const crypto = require('crypto');\n\nconst headers = $json.headers || {};\nconst header = (name) => {\n  const direct = headers[name];\n  if (direct !== undefined) return direct;\n  const lower = headers[name.toLowerCase()];\n  if (lower !== undefined) return lower;\n  const foundKey = Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase());\n  return foundKey ? headers[foundKey] : undefined;\n};\n\nconst endpointSecret = String($env.STRIPE_WEBHOOK_SECRET || '').trim();\nif (!endpointSecret) {\n  throw new Error('STRIPE_WEBHOOK_SECRET is required');\n}\n\nconst signatureHeader = String(header('stripe-signature') || '').trim();\nif (!signatureHeader) {\n  throw new Error('Missing stripe-signature header');\n}\n\nconst rawBody = typeof $json.rawBody === 'string'\n  ? $json.rawBody\n  : (typeof $json.body === 'string' ? $json.body : '');\nif (!rawBody) {\n  throw new Error('Raw request body is required for Stripe signature verification');\n}\n\nconst parts = signatureHeader.split(',').reduce((acc, item) => {\n  const [key, value] = item.split('=');\n  if (!key || !value) return acc;\n  if (!acc[key]) acc[key] = [];\n  acc[key].push(value);\n  return acc;\n}, {});\n\nconst timestamp = Number(parts.t?.[0] || 0);\nif (!Number.isFinite(timestamp) || timestamp <= 0) {\n  throw new Error('Invalid Stripe signature timestamp');\n}\n\nconst tolerance = Number($env.STRIPE_WEBHOOK_TOLERANCE_SECONDS || 300);\nif (!Number.isFinite(tolerance) || tolerance <= 0) {\n  throw new Error('STRIPE_WEBHOOK_TOLERANCE_SECONDS must be a positive number');\n}\n\nconst currentTimestamp = Math.floor(Date.now() / 1000);\nconst driftSeconds = currentTimestamp - timestamp;\nif (driftSeconds > tolerance || driftSeconds < -60) {\n  throw new Error('Stripe signature timestamp outside tolerance (drift=' + driftSeconds + 's)');\n}\n\nconst signedPayload = String(timestamp) + '.' + rawBody;\nconst expected = crypto.createHmac('sha256', endpointSecret).update(signedPayload).digest('hex');\nconst signatures = Array.isArray(parts.v1) ? parts.v1 : [];\n\nconst timingSafeEqualHex = (leftHex, rightHex) => {\n  const left = Buffer.from(leftHex, 'hex');\n  const right = Buffer.from(rightHex, 'hex');\n  if (left.length !== right.length) return false;\n  return crypto.timingSafeEqual(left, right);\n};\n\nconst verified = signatures.some((signature) => /^[a-f0-9]{64}$/i.test(signature) && timingSafeEqualHex(expected, signature));\nif (!verified) {\n  throw new Error('Stripe webhook signature verification failed');\n}\n\nconst eventPayload = typeof $json.body === 'object' && $json.body !== null\n  ? $json.body\n  : JSON.parse(rawBody);\n\nconst expectedLivemodeRaw = String($env.STRIPE_EXPECT_LIVEMODE || '').trim().toLowerCase();\nif (expectedLivemodeRaw) {\n  const expectedLivemode = expectedLivemodeRaw === 'true';\n  const actualLivemode = eventPayload.livemode === true;\n  if (actualLivemode !== expectedLivemode) {\n    throw new Error('Stripe livemode mismatch: expected=' + expectedLivemode + ' actual=' + actualLivemode);\n  }\n}\n\nreturn [{\n  json: {\n    ...$json,\n    verified_event: eventPayload,\n    stripe_signature_verified: true,\n    stripe_signature_timestamp: timestamp\n  }\n}];"
+      }
+    },
+    {
+      "id": "normalize-stripe-event",
+      "name": "Normalize Stripe Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        380
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const payload = $json.verified_event ?? {};\nconst eventType = String(payload.type || '').trim();\nconst eventId = String(payload.id || '').trim();\nconst eventData = payload.data?.object ?? {};\nconst objectType = String(eventData.object || '').trim().toLowerCase();\n\nconst paymentStatus = String(eventData.payment_status || '').toLowerCase();\nconst checkoutStatus = String(eventData.status || '').toLowerCase();\nconst companyId = String(\n  eventData.metadata?.company_id ||\n  eventData.metadata?.companyId ||\n  eventData.client_reference_id ||\n  payload.data?.object?.metadata?.company_id ||\n  ''\n).trim();\n\nconst paymentIntentId = String(\n  eventData.payment_intent?.id ||\n  eventData.payment_intent ||\n  ''\n).trim();\nconst chargeId = String(\n  eventData.charge?.id ||\n  eventData.charge ||\n  (objectType === 'charge' ? eventData.id : '') ||\n  ''\n).trim();\nconst refundId = String(objectType === 'refund' ? eventData.id || '' : '').trim();\n\nconst paidTrigger = eventType === 'checkout.session.completed' && paymentStatus === 'paid';\n\nreturn [{\n  json: {\n    event_id: eventId,\n    event_type: eventType,\n    object_type: objectType,\n    company_id: companyId,\n    checkout_session_id: String(eventData.id || ''),\n    payment_intent_id: paymentIntentId,\n    charge_id: chargeId,\n    refund_id: refundId,\n    payment_status: paymentStatus,\n    checkout_status: checkoutStatus,\n    paid_trigger: paidTrigger,\n    stripe_payload: payload\n  }\n}];"
+      }
+    },
+    {
+      "id": "resolve-company-context",
+      "name": "Resolve Company Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        990,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/billing/resolve-company-context",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { event_id: $json.event_id, event_type: $json.event_type, object_type: $json.object_type, company_id: $json.company_id || null, checkout_session_id: $json.checkout_session_id || null, payment_intent_id: $json.payment_intent_id || null, charge_id: $json.charge_id || null, refund_id: $json.refund_id || null } }}"
+      }
+    },
+    {
+      "id": "check-event-idempotency",
+      "name": "Check Event Idempotency",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1260,
+        380
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/billing/webhook-events/claim",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { event_id: $node['Resolve Company Context'].json.event_id || $node['Normalize Stripe Event'].json.event_id, event_type: $node['Resolve Company Context'].json.event_type || $node['Normalize Stripe Event'].json.event_type, company_id: $node['Resolve Company Context'].json.company_id || $node['Normalize Stripe Event'].json.company_id || null, checkout_session_id: $node['Resolve Company Context'].json.checkout_session_id || $node['Normalize Stripe Event'].json.checkout_session_id || null, received_at: new Date().toISOString() } }}"
+      }
+    },
+    {
+      "id": "merge-event-context",
+      "name": "Merge Event Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1530,
+        380
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const context = $node['Resolve Company Context'].json;\nconst indicators = ['accepted', 'is_new', 'created', 'claimed'];\nconst hasPositive = indicators.some((key) => $json[key] === true);\nconst hasNegative = indicators.some((key) => $json[key] === false) ||\n  $json.duplicate === true ||\n  $json.already_processed === true ||\n  $json.is_duplicate === true;\n\nif (hasPositive && hasNegative) {\n  throw new Error('idempotency claim response is contradictory (both new and duplicate)');\n}\nif (!hasPositive && !hasNegative) {\n  throw new Error('idempotency claim response must include a new/duplicate indicator');\n}\n\nif (String(context.event_id || '').trim() !== String($node['Normalize Stripe Event'].json.event_id || '').trim()) {\n  throw new Error('resolved company context event_id mismatch');\n}\n\nconst eventNew = hasPositive && !hasNegative;\n\nreturn [{\n  json: {\n    ...context,\n    ...$json,\n    event_new: eventNew\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-event-new",
+      "name": "If Event New?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        380
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.event_new === true}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "if-checkout-completed-paid",
+      "name": "If Checkout Completed & Paid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2070,
+        380
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.paid_trigger === true}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "if-company-context-present",
+      "name": "If Company Context Present?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2340,
+        260
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{String($json.company_id || '').trim().length > 0}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "mark-paid-status",
+      "name": "Mark Paid Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2610,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/payment-status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id, payment_status: 'paid', stripe_event_id: $json.event_id, checkout_session_id: $json.checkout_session_id, source_event: $json.event_type } }}"
+      }
+    },
+    {
+      "id": "trigger-detailed-analysis-workflow",
+      "name": "Trigger Detailed Analysis Workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2880,
+        200
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://automation.internal/webhook/hp-paid-analysis",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id, paid_trigger: true, stripe_event_id: $json.event_id, checkout_session_id: $json.checkout_session_id } }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-workflow-token",
+              "value": "={{$env.INTERNAL_WORKFLOW_TOKEN}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "mark-missing-company-context",
+      "name": "Mark Missing Company Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2610,
+        360
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id || null, status: 'manual_review_required', reason: 'stripe_event_missing_company_id', stripe_event_id: $json.event_id, source_event: $json.event_type } }}"
+      }
+    },
+    {
+      "id": "if-payment-failed-event",
+      "name": "If Payment Failed Event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2340,
+        520
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{['payment_intent.payment_failed', 'checkout.session.async_payment_failed', 'checkout.session.expired'].includes($json.event_type)}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "mark-payment-hold",
+      "name": "Mark Payment Hold",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2610,
+        500
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/payment-status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id, payment_status: 'hold', reason: 'payment_failed', source_event: $json.event_type } }}"
+      }
+    },
+    {
+      "id": "if-refund-event",
+      "name": "If Refund Event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2610,
+        680
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{['charge.refunded', 'refund.created'].includes($json.event_type)}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "stop-published-proposal",
+      "name": "Stop Published Proposal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2880,
+        620
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/proposals/stop-publication",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id, reason: 'refund_event', stripe_event_id: $json.event_id, source_event: $json.event_type } }}"
+      }
+    },
+    {
+      "id": "mark-refund-hold",
+      "name": "Mark Refund Hold",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3150,
+        620
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/payment-status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id || null, payment_status: 'refunded', status: 'manual_review_required', reason: 'refund_event', stripe_event_id: $json.event_id, source_event: $json.event_type } }}"
+      }
+    },
+    {
+      "id": "ignore-non-billing-event",
+      "name": "Ignore Non-Billing Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        820
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "return [{ json: { ignored: true, reason: 'non-billing-event', event_type: $json.event_type } }];"
+      }
+    },
+    {
+      "id": "ignore-duplicate-event",
+      "name": "Ignore Duplicate Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2070,
+        620
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "return [{\n  json: {\n    ignored: true,\n    reason: 'duplicate_stripe_event',\n    event_id: $json.event_id,\n    event_type: $json.event_type\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-company-context-for-payment-failed",
+      "name": "If Company Context Present (Payment Failed)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2610,
+        500
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{String($json.company_id || '').trim().length > 0}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "if-company-context-for-refund",
+      "name": "If Company Context Present (Refund)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        620
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{String($json.company_id || '').trim().length > 0}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Stripe Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Stripe Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Stripe Signature": {
+      "main": [
+        [
+          {
+            "node": "Normalize Stripe Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Stripe Event": {
+      "main": [
+        [
+          {
+            "node": "Resolve Company Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Company Context": {
+      "main": [
+        [
+          {
+            "node": "Check Event Idempotency",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Event Idempotency": {
+      "main": [
+        [
+          {
+            "node": "Merge Event Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Event Context": {
+      "main": [
+        [
+          {
+            "node": "If Event New?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Event New?": {
+      "main": [
+        [
+          {
+            "node": "If Checkout Completed & Paid?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore Duplicate Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Checkout Completed & Paid?": {
+      "main": [
+        [
+          {
+            "node": "If Company Context Present?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "If Payment Failed Event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Company Context Present?": {
+      "main": [
+        [
+          {
+            "node": "Mark Paid Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Missing Company Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Paid Status": {
+      "main": [
+        [
+          {
+            "node": "Trigger Detailed Analysis Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Payment Failed Event?": {
+      "main": [
+        [
+          {
+            "node": "If Company Context Present (Payment Failed)?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "If Refund Event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Refund Event?": {
+      "main": [
+        [
+          {
+            "node": "If Company Context Present (Refund)?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore Non-Billing Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stop Published Proposal": {
+      "main": [
+        [
+          {
+            "node": "Mark Refund Hold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Company Context Present (Payment Failed)?": {
+      "main": [
+        [
+          {
+            "node": "Mark Payment Hold",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Missing Company Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Company Context Present (Refund)?": {
+      "main": [
+        [
+          {
+            "node": "Stop Published Proposal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Missing Company Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

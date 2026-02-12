@@ -1,0 +1,280 @@
+#!/usr/bin/env node
+
+const fs = require("fs");
+const path = require("path");
+
+const requiredFiles = [
+  "docs/HP自動生成ワークフロー設計.md",
+  "docs/architecture.md",
+  "docs/workflow-state-machine.md",
+  "n8n/ingest-workflow.json",
+  "n8n/stripe-webhook-workflow.json",
+  "n8n/analysis-worker-workflow.json",
+  "n8n/build-worker-workflow.json",
+  "schemas/content-inventory.schema.json"
+];
+
+const readJson = (repoRoot, filePath) => {
+  const fullPath = path.join(repoRoot, filePath);
+  return JSON.parse(fs.readFileSync(fullPath, "utf8"));
+};
+
+const findNode = (workflow, name) => workflow.nodes.find((node) => node.name === name);
+
+const findConnectionTargets = (workflow, sourceName, outputIndex = 0) => {
+  const source = workflow.connections[sourceName];
+  if (!source || !Array.isArray(source.main) || !Array.isArray(source.main[outputIndex])) {
+    return [];
+  }
+  return source.main[outputIndex].map((item) => item.node);
+};
+
+const assert = (condition, message) => {
+  if (!condition) {
+    throw new Error(message);
+  }
+};
+
+const assertWorkflowShape = (workflow, workflowName) => {
+  assert(typeof workflow.name === "string" && workflow.name.length > 0, `${workflowName}: name is required`);
+  assert(Array.isArray(workflow.nodes) && workflow.nodes.length > 0, `${workflowName}: nodes are required`);
+  assert(
+    workflow.connections && typeof workflow.connections === "object",
+    `${workflowName}: connections are required`
+  );
+};
+
+const assertNoPaidPathInIngest = (workflow) => {
+  const urls = workflow.nodes
+    .filter((node) => node.type === "n8n-nodes-base.httpRequest")
+    .map((node) => node.parameters?.url || "");
+  const hasPaidQueue = urls.some(
+    (url) =>
+      /analysis/i.test(url) &&
+      !/create-free-comparison|send-preview|checkout-session/i.test(url)
+  );
+  assert(!hasPaidQueue, "ingest workflow must not include paid analysis path");
+};
+
+const assertStripeGate = (workflow) => {
+  const verifyNode = findNode(workflow, "Verify Stripe Signature");
+  assert(verifyNode, "stripe workflow missing Verify Stripe Signature");
+  const verifyCode = verifyNode.parameters?.jsCode || "";
+  assert(
+    verifyCode.includes("stripe-signature") && verifyCode.includes("STRIPE_WEBHOOK_SECRET"),
+    "stripe workflow must verify Stripe signature with endpoint secret"
+  );
+  assert(
+    verifyCode.includes("rawBody") && verifyCode.includes("tolerance"),
+    "stripe workflow must verify raw body and timestamp tolerance"
+  );
+
+  const eventNewGate = findNode(workflow, "If Event New?");
+  const idempotencyNode = findNode(workflow, "Check Event Idempotency");
+  assert(eventNewGate, "stripe workflow missing If Event New?");
+  assert(idempotencyNode, "stripe workflow missing Check Event Idempotency");
+  const duplicateTargets = findConnectionTargets(workflow, "If Event New?", 1);
+  assert(
+    duplicateTargets.includes("Ignore Duplicate Event"),
+    "stripe workflow duplicate branch must end at Ignore Duplicate Event"
+  );
+
+  const gate = findNode(workflow, "If Checkout Completed & Paid?");
+  const trigger = findNode(workflow, "Trigger Detailed Analysis Workflow");
+  assert(gate, "stripe workflow missing If Checkout Completed & Paid?");
+  assert(trigger, "stripe workflow missing Trigger Detailed Analysis Workflow");
+
+  const trueTargets = findConnectionTargets(workflow, "If Checkout Completed & Paid?", 0);
+  const falseTargets = findConnectionTargets(workflow, "If Checkout Completed & Paid?", 1);
+  assert(trueTargets.includes("If Company Context Present?"), "stripe workflow true branch must validate company context");
+  assert(
+    !falseTargets.includes("Trigger Detailed Analysis Workflow"),
+    "stripe workflow false branch must not trigger paid analysis"
+  );
+
+  const normalizeNode = findNode(workflow, "Normalize Stripe Event");
+  const normalizeCode = normalizeNode?.parameters?.jsCode || "";
+  assert(
+    normalizeCode.includes("checkout.session.completed") && normalizeCode.includes("paymentStatus === 'paid'"),
+    "stripe workflow must explicitly gate by checkout.session.completed"
+  );
+  assert(
+    !normalizeCode.includes("checkoutStatus === 'complete'"),
+    "stripe workflow paid trigger must not use checkout status only"
+  );
+
+  const triggerHeaders = trigger.parameters?.headerParameters?.parameters || [];
+  const headerNames = new Set(triggerHeaders.map((header) => header.name));
+  assert(
+    headerNames.has("x-internal-workflow-token"),
+    "stripe workflow must forward internal workflow token header"
+  );
+};
+
+const assertAnalysisWorkflow = (workflow) => {
+  const requiredWaitNodes = ["Wait R1 Approval", "Wait R2 Approval"];
+  requiredWaitNodes.forEach((name) => {
+    const node = findNode(workflow, name);
+    assert(node, `analysis workflow missing ${name}`);
+    assert(node.type === "n8n-nodes-base.wait", `analysis workflow ${name} must be Wait node`);
+  });
+
+  const paidGate = findNode(workflow, "If Paid Trigger Valid?");
+  const paidGateExpr = paidGate?.parameters?.conditions?.boolean?.[0]?.value1 || "";
+  assert(
+    paidGateExpr.includes("internal_token_valid"),
+    "analysis workflow must require internal trigger token"
+  );
+
+  const idempotencyNode = findNode(workflow, "Check Analysis Idempotency");
+  const eventNewGate = findNode(workflow, "If Analysis Event New?");
+  assert(idempotencyNode, "analysis workflow missing Check Analysis Idempotency");
+  assert(eventNewGate, "analysis workflow missing If Analysis Event New?");
+
+  const psiMobile = findNode(workflow, "PSI Mobile");
+  const psiDesktop = findNode(workflow, "PSI Desktop");
+  [psiMobile, psiDesktop].forEach((node, idx) => {
+    assert(node, `analysis workflow missing PSI node ${idx + 1}`);
+    const params = node.parameters?.queryParameters?.parameters || [];
+    const names = new Set(params.map((param) => param.name));
+    assert(names.has("url"), `${node.name} must include url query`);
+    assert(names.has("strategy"), `${node.name} must include strategy query`);
+    assert(names.has("category"), `${node.name} must include category query`);
+  });
+
+  const lockGate = findNode(workflow, "If Content Lock OK?");
+  assert(lockGate, "analysis workflow missing content lock gate");
+  const falseTargets = findConnectionTargets(workflow, "If Content Lock OK?", 1);
+  assert(
+    falseTargets.includes("Stop Publication (Content Lock Violation)"),
+    "analysis workflow must stop publication on content lock violation"
+  );
+  const violationTargets = findConnectionTargets(workflow, "Stop Publication (Content Lock Violation)", 0);
+  assert(
+    violationTargets.includes("Mark Content Lock Violation"),
+    "analysis workflow must update state after content lock violation"
+  );
+
+  const challengeNodes = ["Issue R1 Approval Challenge", "Issue R2 Approval Challenge"];
+  challengeNodes.forEach((name) => {
+    const node = findNode(workflow, name);
+    const code = node?.parameters?.jsCode || "";
+    assert(node, `analysis workflow missing ${name}`);
+    assert(
+      code.includes("approval_token") || code.includes("randomBytes"),
+      `${name} must issue signed approval token`
+    );
+  });
+
+  const parseNodes = ["Parse R1 Decision", "Parse R2 Decision"];
+  parseNodes.forEach((name) => {
+    const node = findNode(workflow, name);
+    const code = node?.parameters?.jsCode || "";
+    assert(node, `analysis workflow missing ${name}`);
+    assert(
+      code.includes("approval_token") && code.includes("approver_role") && code.includes("within_deadline"),
+      `${name} must validate token, role, and deadline`
+    );
+  });
+
+  const r2Retry = findNode(workflow, "If R2 Retry Remaining?");
+  assert(r2Retry, "analysis workflow missing If R2 Retry Remaining?");
+  const r2RetryTargets = findConnectionTargets(workflow, "If R2 Retry Remaining?", 1);
+  assert(
+    r2RetryTargets.includes("Mark R2 Retry Exhausted"),
+    "analysis workflow R2 retry exhausted must stop with manual review"
+  );
+};
+
+const assertBuildWorkflow = (workflow) => {
+  const triggerGate = findNode(workflow, "If Build Trigger Valid?");
+  assert(triggerGate, "build workflow missing If Build Trigger Valid?");
+  const triggerExpr = triggerGate.parameters?.conditions?.boolean?.[0]?.value1 || "";
+  assert(
+    triggerExpr.includes("content_lock_ready") && triggerExpr.includes("internal_token_valid"),
+    "build workflow must require content_lock_ready and internal token"
+  );
+
+  const requiredWaitNodes = ["Wait R3 Approval", "Wait R4 Approval"];
+  requiredWaitNodes.forEach((name) => {
+    const node = findNode(workflow, name);
+    assert(node, `build workflow missing ${name}`);
+    assert(node.type === "n8n-nodes-base.wait", `build workflow ${name} must be Wait node`);
+  });
+
+  const qualityGateNode = findNode(workflow, "If Quality Passed?");
+  assert(qualityGateNode, "build workflow missing If Quality Passed?");
+  const qualityFalseTargets = findConnectionTargets(workflow, "If Quality Passed?", 1);
+  assert(
+    qualityFalseTargets.includes("If Retry Remaining?"),
+    "build workflow quality NG must go to retry gate"
+  );
+
+  const publishTargetsFromQuality = qualityFalseTargets.concat(
+    findConnectionTargets(workflow, "If Quality Passed?", 0)
+  );
+  assert(
+    !publishTargetsFromQuality.includes("Send Proposal Delivery"),
+    "build workflow must not send delivery directly from quality gate"
+  );
+
+  const challengeNodes = ["Issue R3 Approval Challenge", "Issue R4 Approval Challenge"];
+  challengeNodes.forEach((name) => {
+    const node = findNode(workflow, name);
+    const code = node?.parameters?.jsCode || "";
+    assert(node, `build workflow missing ${name}`);
+    assert(
+      code.includes("approval_token") || code.includes("randomBytes"),
+      `${name} must issue signed approval token`
+    );
+  });
+
+  const parseNodes = ["Parse R3 Decision", "Parse R4 Decision"];
+  parseNodes.forEach((name) => {
+    const node = findNode(workflow, name);
+    const code = node?.parameters?.jsCode || "";
+    assert(node, `build workflow missing ${name}`);
+    assert(
+      code.includes("approval_token") && code.includes("approver_role") && code.includes("within_deadline"),
+      `${name} must validate token, role, and deadline`
+    );
+  });
+
+  const retryTargets = findConnectionTargets(workflow, "Increment Build Attempt", 0);
+  assert(retryTargets.includes("Log Build Retry"), "build workflow must log retry before rebuild");
+};
+
+const main = () => {
+  try {
+    const repoRoot = path.join(__dirname, "..");
+    const missing = requiredFiles.filter((filePath) => {
+      const fullPath = path.join(repoRoot, filePath);
+      return !fs.existsSync(fullPath);
+    });
+    if (missing.length > 0) {
+      throw new Error(`missing required files: ${missing.join(", ")}`);
+    }
+
+    const ingestWorkflow = readJson(repoRoot, "n8n/ingest-workflow.json");
+    const stripeWorkflow = readJson(repoRoot, "n8n/stripe-webhook-workflow.json");
+    const analysisWorkflow = readJson(repoRoot, "n8n/analysis-worker-workflow.json");
+    const buildWorkflow = readJson(repoRoot, "n8n/build-worker-workflow.json");
+
+    assertWorkflowShape(ingestWorkflow, "ingest-workflow");
+    assertWorkflowShape(stripeWorkflow, "stripe-webhook-workflow");
+    assertWorkflowShape(analysisWorkflow, "analysis-worker-workflow");
+    assertWorkflowShape(buildWorkflow, "build-worker-workflow");
+
+    assertNoPaidPathInIngest(ingestWorkflow);
+    assertStripeGate(stripeWorkflow);
+    assertAnalysisWorkflow(analysisWorkflow);
+    assertBuildWorkflow(buildWorkflow);
+
+    process.stdout.write("workflow structure check passed\n");
+  } catch (error) {
+    fs.writeSync(process.stderr.fd, `test-workflow failed: ${error.message}\n`);
+    process.exit(1);
+  }
+};
+
+main();

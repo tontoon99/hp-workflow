@@ -1,0 +1,7 @@
+version: 1
+agent:
+  display_name: HP Workflow Orchestrator
+  short_description: Build and maintain the card-to-3URL workflow with phase and quality control.
+  default_prompt: >
+    Implement changes for the selected phase of HP workflow. Keep schema contracts stable,
+    update n8n orchestration safely, and enforce content lock plus quality gate requirements.

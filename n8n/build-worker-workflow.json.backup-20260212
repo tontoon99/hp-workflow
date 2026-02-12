@@ -1,0 +1,128 @@
+{
+  "name": "hp-workflow-build-worker",
+  "nodes": [
+    {
+      "id": "manual-trigger",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        220,
+        280
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "load-content-inventory",
+      "name": "Load Content Inventory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        490,
+        280
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.internal/content-lock"
+      }
+    },
+    {
+      "id": "build-variants",
+      "name": "Build Variants",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        760,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/build-variants",
+        "sendBody": true,
+        "specifyBody": "json"
+      }
+    },
+    {
+      "id": "quality-gate",
+      "name": "Quality Gate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1030,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/quality-gate",
+        "sendBody": true,
+        "specifyBody": "json"
+      }
+    },
+    {
+      "id": "publish-proposal",
+      "name": "Publish Proposal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/publish-proposal",
+        "sendBody": true,
+        "specifyBody": "json"
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Load Content Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Content Inventory": {
+      "main": [
+        [
+          {
+            "node": "Build Variants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Variants": {
+      "main": [
+        [
+          {
+            "node": "Quality Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quality Gate": {
+      "main": [
+        [
+          {
+            "node": "Publish Proposal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

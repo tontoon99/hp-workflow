@@ -1,0 +1,277 @@
+{
+  "name": "hp-workflow-stripe-webhook",
+  "nodes": [
+    {
+      "id": "stripe-webhook",
+      "name": "Stripe Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        180,
+        380
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hp-stripe-events",
+        "responseMode": "onReceived",
+        "options": {
+          "rawBody": true,
+          "responseData": "received"
+        }
+      }
+    },
+    {
+      "id": "normalize-stripe-event",
+      "name": "Normalize Stripe Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        450,
+        380
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const payload = $json.body ?? {};\nconst eventType = String(payload.type || '').trim();\nconst eventId = String(payload.id || '').trim();\nconst eventData = payload.data?.object ?? {};\n\nconst paymentStatus = String(eventData.payment_status || '').toLowerCase();\nconst checkoutStatus = String(eventData.status || '').toLowerCase();\nconst companyId = String(\n  eventData.metadata?.company_id ||\n  eventData.metadata?.companyId ||\n  eventData.client_reference_id ||\n  ''\n).trim();\n\nconst paidTrigger = (\n  eventType === 'checkout.session.completed' &&\n  (paymentStatus === 'paid' || checkoutStatus === 'complete')\n);\n\nreturn [{\n  json: {\n    event_id: eventId,\n    event_type: eventType,\n    company_id: companyId,\n    checkout_session_id: String(eventData.id || ''),\n    payment_status: paymentStatus,\n    checkout_status: checkoutStatus,\n    paid_trigger: paidTrigger,\n    stripe_payload: payload\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-checkout-completed-paid",
+      "name": "If Checkout Completed & Paid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        720,
+        380
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.paid_trigger === true}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "mark-paid-status",
+      "name": "Mark Paid Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        990,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/payment-status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id, payment_status: 'paid', stripe_event_id: $json.event_id, checkout_session_id: $json.checkout_session_id, source_event: $json.event_type } }}"
+      }
+    },
+    {
+      "id": "trigger-detailed-analysis-workflow",
+      "name": "Trigger Detailed Analysis Workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1260,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://automation.internal/webhook/hp-paid-analysis",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Stripe Event'].json.company_id, paid_trigger: true, stripe_event_id: $node['Normalize Stripe Event'].json.event_id, checkout_session_id: $node['Normalize Stripe Event'].json.checkout_session_id } }}"
+      }
+    },
+    {
+      "id": "if-payment-failed-event",
+      "name": "If Payment Failed Event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        990,
+        520
+      ],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.event_type}}",
+              "value2": "payment_intent.payment_failed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "mark-payment-hold",
+      "name": "Mark Payment Hold",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1260,
+        440
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/payment-status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id, payment_status: 'hold', reason: 'payment_failed', source_event: $json.event_type } }}"
+      }
+    },
+    {
+      "id": "if-refund-event",
+      "name": "If Refund Event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1260,
+        620
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{['charge.refunded', 'refund.created'].includes($json.event_type)}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "stop-published-proposal",
+      "name": "Stop Published Proposal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1530,
+        560
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/proposals/stop-publication",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id, reason: 'refund_event', stripe_event_id: $json.event_id, source_event: $json.event_type } }}"
+      }
+    },
+    {
+      "id": "ignore-non-billing-event",
+      "name": "Ignore Non-Billing Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1530,
+        700
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "return [{ json: { ignored: true, reason: 'non-billing-event', event_type: $json.event_type } }];"
+      }
+    }
+  ],
+  "connections": {
+    "Stripe Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Stripe Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Stripe Event": {
+      "main": [
+        [
+          {
+            "node": "If Checkout Completed & Paid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Checkout Completed & Paid?": {
+      "main": [
+        [
+          {
+            "node": "Mark Paid Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "If Payment Failed Event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Paid Status": {
+      "main": [
+        [
+          {
+            "node": "Trigger Detailed Analysis Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Payment Failed Event?": {
+      "main": [
+        [
+          {
+            "node": "Mark Payment Hold",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "If Refund Event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Refund Event?": {
+      "main": [
+        [
+          {
+            "node": "Stop Published Proposal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore Non-Billing Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

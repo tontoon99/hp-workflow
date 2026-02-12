@@ -1,0 +1,1234 @@
+{
+  "name": "hp-workflow-analysis-worker",
+  "nodes": [
+    {
+      "id": "webhook-paid-analysis-start",
+      "name": "Webhook Paid Analysis Start",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        160,
+        460
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hp-paid-analysis",
+        "responseMode": "onReceived",
+        "options": {
+          "responseData": "accepted"
+        }
+      }
+    },
+    {
+      "id": "normalize-paid-payload",
+      "name": "Normalize Paid Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        460
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const body = typeof $json.body === 'object' && $json.body !== null ? $json.body : {};\nconst headers = $json.headers || {};\n\nconst getHeader = (name) => {\n  const direct = headers[name];\n  if (direct !== undefined) return String(direct);\n  const lower = headers[name.toLowerCase()];\n  if (lower !== undefined) return String(lower);\n  const key = Object.keys(headers).find((item) => item.toLowerCase() === name.toLowerCase());\n  return key ? String(headers[key]) : '';\n};\n\nconst companyId = String(body.company_id || '').trim();\nif (!companyId) {\n  throw new Error('company_id is required');\n}\n\nconst paidTrigger = body.paid_trigger === true || body.paid_trigger === 'true';\nconst crypto = require('crypto');\n\nconst expectedToken = String($env.INTERNAL_WORKFLOW_TOKEN || '').trim();\nif (!expectedToken) {\n  throw new Error('INTERNAL_WORKFLOW_TOKEN is required');\n}\nconst providedToken = getHeader('x-internal-workflow-token').trim();\n\nconst safeEqual = (left, right) => {\n  if (!left || !right) return false;\n  const leftBuf = Buffer.from(left);\n  const rightBuf = Buffer.from(right);\n  if (leftBuf.length !== rightBuf.length) return false;\n  return crypto.timingSafeEqual(leftBuf, rightBuf);\n};\n\nconst internalTokenValid = safeEqual(providedToken, expectedToken);\n\nreturn [{\n  json: {\n    company_id: companyId,\n    paid_trigger: paidTrigger,\n    internal_token_valid: internalTokenValid,\n    checkout_session_id: String(body.checkout_session_id || ''),\n    stripe_event_id: String(body.stripe_event_id || ''),\n    requested_at: new Date().toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-paid-trigger-valid",
+      "name": "If Paid Trigger Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        680,
+        460
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.paid_trigger === true}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "mark-invalid-paid-trigger",
+      "name": "Mark Invalid Paid Trigger",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        950,
+        700
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id, status: 'manual_review_required', reason: 'paid_trigger_missing_or_invalid', paid_trigger: $json.paid_trigger, internal_token_valid: $json.internal_token_valid } }}"
+      }
+    },
+    {
+      "id": "check-analysis-idempotency",
+      "name": "Check Analysis Idempotency",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        950,
+        340
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/analysis-events/claim",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id, stripe_event_id: $json.stripe_event_id || null, checkout_session_id: $json.checkout_session_id || null, requested_at: $json.requested_at } }}"
+      }
+    },
+    {
+      "id": "merge-analysis-context",
+      "name": "Merge Analysis Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1220,
+        340
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const indicators = ['accepted', 'is_new', 'created', 'claimed'];\nconst hasPositive = indicators.some((key) => $json[key] === true);\nconst hasNegative = indicators.some((key) => $json[key] === false) ||\n  $json.duplicate === true ||\n  $json.already_processed === true ||\n  $json.is_duplicate === true;\n\nif (hasPositive && hasNegative) {\n  throw new Error('analysis idempotency claim response is contradictory (both new and duplicate)');\n}\nif (!hasPositive && !hasNegative) {\n  throw new Error('analysis idempotency claim response must include a new/duplicate indicator');\n}\n\nconst analysisEventNew = hasPositive && !hasNegative;\n\nreturn [{\n  json: {\n    ...$node['Normalize Paid Payload'].json,\n    ...$json,\n    analysis_event_new: analysisEventNew\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-analysis-event-new",
+      "name": "If Analysis Event New?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1490,
+        340
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.analysis_event_new === true}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ignore-duplicate-analysis-trigger",
+      "name": "Ignore Duplicate Analysis Trigger",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        560
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "return [{\n  json: {\n    ignored: true,\n    reason: 'duplicate_analysis_trigger',\n    company_id: $json.company_id,\n    stripe_event_id: $json.stripe_event_id\n  }\n}];"
+      }
+    },
+    {
+      "id": "update-status-analysis-running",
+      "name": "Update Status Analysis Running",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $json.company_id, status: 'analysis_running', started_at: $json.requested_at } }}"
+      }
+    },
+    {
+      "id": "resolve-website",
+      "name": "Resolve Website",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2030,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/resolve-website",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id } }}"
+      }
+    },
+    {
+      "id": "if-website-confidence-pass",
+      "name": "If Website Confidence Pass?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2300,
+        280
+      ],
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{Number($json.resolution_confidence || $json.confidence || 0)}}",
+              "operation": "largerEqual",
+              "value2": 0.85
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "mark-r1-required",
+      "name": "Mark R1 Manual Review Required",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2570,
+        520
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, status: 'manual_review_required', reason: 'website_confidence_below_threshold', confidence: Number($node['Resolve Website'].json.resolution_confidence || $node['Resolve Website'].json.confidence || 0) } }}"
+      }
+    },
+    {
+      "id": "issue-r1-approval-challenge",
+      "name": "Issue R1 Approval Challenge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2570,
+        140
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const crypto = require('crypto');\n\nconst deadline = new Date(Date.now() + (24 * 60 * 60 * 1000)).toISOString();\n\nreturn [{\n  json: {\n    ...$json,\n    r1_approval_token: crypto.randomBytes(24).toString('hex'),\n    r1_required_role: 'operator',\n    r1_deadline_at: deadline\n  }\n}];"
+      }
+    },
+    {
+      "id": "wait-r1-approval",
+      "name": "Wait R1 Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2840,
+        140
+      ],
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 24,
+        "resumeUnit": "hours",
+        "options": {
+          "webhookSuffix": "r1-approval"
+        }
+      }
+    },
+    {
+      "id": "parse-r1-decision",
+      "name": "Parse R1 Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3110,
+        140
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const crypto = require('crypto');\n\nconst body = $json.body ?? {};\nconst decision = String(body.decision || body.status || $json.decision || '').toLowerCase();\nconst providedToken = String(body.approval_token || body.token || '').trim();\nconst expectedToken = String($json.r1_approval_token || '').trim();\nconst requiredRole = String($json.r1_required_role || 'operator').trim();\nconst approverRole = String(body.approver_role || body.role || '').trim();\nconst approverId = String(body.approver_id || body.user_id || '').trim();\nconst deadlineAt = Date.parse(String($json.r1_deadline_at || ''));\n\nconst safeEqual = (left, right) => {\n  if (!left || !right) return false;\n  const leftBuf = Buffer.from(left);\n  const rightBuf = Buffer.from(right);\n  if (leftBuf.length !== rightBuf.length) return false;\n  return crypto.timingSafeEqual(leftBuf, rightBuf);\n};\n\nconst tokenOk = safeEqual(providedToken, expectedToken);\nconst roleOk = approverRole === requiredRole;\nconst actorOk = approverId.length > 0;\nconst withinDeadline = Number.isFinite(deadlineAt) && Date.now() <= deadlineAt;\nconst approved = decision === 'approved' && tokenOk && roleOk && actorOk && withinDeadline;\n\nreturn [{\n  json: {\n    ...$json,\n    approval: approved ? 'approved' : 'rejected',\n    approval_actor: {\n      id: approverId,\n      role: approverRole\n    },\n    approval_validation: {\n      token_ok: tokenOk,\n      role_ok: roleOk,\n      actor_ok: actorOk,\n      within_deadline: withinDeadline\n    }\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-r1-approved",
+      "name": "If R1 Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3380,
+        140
+      ],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.approval}}",
+              "value2": "approved"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "mark-r1-rejected",
+      "name": "Mark R1 Rejected",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3650,
+        360
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, status: 'manual_review_required', reason: 'r1_rejected_or_invalid_approval', approval_validation: $json.approval_validation || null } }}"
+      }
+    },
+    {
+      "id": "crawl-site",
+      "name": "Crawl Site",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3650,
+        20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/crawl",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, url: $node['Resolve Website'].json.official_website || $node['Resolve Website'].json.website || '' } }}"
+      }
+    },
+    {
+      "id": "psi-mobile",
+      "name": "PSI Mobile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3920,
+        20
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{$node['Resolve Website'].json.official_website || $node['Resolve Website'].json.website || ''}}"
+            },
+            {
+              "name": "strategy",
+              "value": "mobile"
+            },
+            {
+              "name": "category",
+              "value": "performance"
+            },
+            {
+              "name": "category",
+              "value": "accessibility"
+            },
+            {
+              "name": "category",
+              "value": "seo"
+            },
+            {
+              "name": "key",
+              "value": "={{$env.GOOGLE_PSI_API_KEY}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "psi-desktop",
+      "name": "PSI Desktop",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4190,
+        20
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "url",
+              "value": "={{$node['Resolve Website'].json.official_website || $node['Resolve Website'].json.website || ''}}"
+            },
+            {
+              "name": "strategy",
+              "value": "desktop"
+            },
+            {
+              "name": "category",
+              "value": "performance"
+            },
+            {
+              "name": "category",
+              "value": "accessibility"
+            },
+            {
+              "name": "category",
+              "value": "seo"
+            },
+            {
+              "name": "key",
+              "value": "={{$env.GOOGLE_PSI_API_KEY}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "lighthouse-audit",
+      "name": "Lighthouse Audit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4460,
+        20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/lighthouse/run",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, url: $node['Resolve Website'].json.official_website || $node['Resolve Website'].json.website || '' } }}"
+      }
+    },
+    {
+      "id": "build-content-inventory",
+      "name": "Build Content Inventory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4730,
+        20
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const crypto = require('crypto');\n\nconst companyId = $node['Normalize Paid Payload'].json.company_id;\nconst resolution = $node['Resolve Website'].json;\nconst crawl = $node['Crawl Site'].json;\nconst officialUrl = String(resolution.official_website || resolution.website || '').trim();\nconst r2ReextractAttempt = Number($json.r2_reextract_attempt || 0);\nif (!officialUrl) {\n  throw new Error('official website is missing');\n}\n\nconst sections = Array.isArray(crawl.sections) ? crawl.sections : [];\nconst fallbackSection = sections.length === 0\n  ? [{ id: 'summary', headline: String(crawl.title || 'Company Summary'), body: String(crawl.summary || '') }]\n  : sections;\n\nconst textHashes = {};\nfor (const section of fallbackSection) {\n  const key = String(section.id || section.headline || 'section').trim() || 'section';\n  const rawText = JSON.stringify(section);\n  const hash = crypto.createHash('sha256').update(rawText).digest('hex');\n  textHashes[key] = `sha256:${hash}`;\n}\n\nreturn [{\n  json: {\n    company_id: companyId,\n    company: {\n      name: String(resolution.company_name || crawl.company_name || ''),\n      official_url: officialUrl,\n      address: String(crawl.address || ''),\n      phone: String(crawl.phone || '')\n    },\n    content_lock: {\n      policy: 'no_new_text',\n      allow: ['reorder', 'layout_change', 'typography_change', 'whitespace_change'],\n      deny: ['add_claims', 'delete_sections', 'rewrite_body'],\n      text_hashes: textHashes\n    },\n    sections: fallbackSection,\n    psi: {\n      mobile: $node['PSI Mobile'].json,\n      desktop: $node['PSI Desktop'].json\n    },\n    lighthouse: $node['Lighthouse Audit'].json,\n    r2_reextract_attempt: r2ReextractAttempt\n  }\n}];"
+      }
+    },
+    {
+      "id": "check-content-lock",
+      "name": "Check Content Lock",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5000,
+        20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/content-lock/verify",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}"
+      }
+    },
+    {
+      "id": "if-content-lock-ok",
+      "name": "If Content Lock OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5270,
+        20
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.content_lock_ok === true || $json.passed === true}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "stop-publication-content-lock-violation",
+      "name": "Stop Publication (Content Lock Violation)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5540,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/proposals/stop-publication",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, reason: 'content_lock_violation', lock_result: $json } }}"
+      }
+    },
+    {
+      "id": "mark-content-lock-violation",
+      "name": "Mark Content Lock Violation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5810,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, status: 'manual_review_required', reason: 'content_lock_violation', content_lock_result: $json } }}"
+      }
+    },
+    {
+      "id": "initialize-r2-reextract-attempt",
+      "name": "Initialize R2 Reextract Attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5540,
+        -40
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "return [{\n  json: {\n    ...$json,\n    r2_reextract_attempt: Number($json.r2_reextract_attempt || 0)\n  }\n}];"
+      }
+    },
+    {
+      "id": "issue-r2-approval-challenge",
+      "name": "Issue R2 Approval Challenge",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5810,
+        -40
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const crypto = require('crypto');\n\nconst deadline = new Date(Date.now() + (24 * 60 * 60 * 1000)).toISOString();\n\nreturn [{\n  json: {\n    ...$json,\n    r2_approval_token: crypto.randomBytes(24).toString('hex'),\n    r2_required_role: 'director',\n    r2_deadline_at: deadline\n  }\n}];"
+      }
+    },
+    {
+      "id": "wait-r2-approval",
+      "name": "Wait R2 Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        6080,
+        -40
+      ],
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 24,
+        "resumeUnit": "hours",
+        "options": {
+          "webhookSuffix": "r2-approval"
+        }
+      }
+    },
+    {
+      "id": "parse-r2-decision",
+      "name": "Parse R2 Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6350,
+        -40
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const crypto = require('crypto');\n\nconst body = $json.body ?? {};\nconst decision = String(body.decision || body.status || $json.decision || '').toLowerCase();\nconst providedToken = String(body.approval_token || body.token || '').trim();\nconst expectedToken = String($json.r2_approval_token || '').trim();\nconst requiredRole = String($json.r2_required_role || 'director').trim();\nconst approverRole = String(body.approver_role || body.role || '').trim();\nconst approverId = String(body.approver_id || body.user_id || '').trim();\nconst deadlineAt = Date.parse(String($json.r2_deadline_at || ''));\n\nconst safeEqual = (left, right) => {\n  if (!left || !right) return false;\n  const leftBuf = Buffer.from(left);\n  const rightBuf = Buffer.from(right);\n  if (leftBuf.length !== rightBuf.length) return false;\n  return crypto.timingSafeEqual(leftBuf, rightBuf);\n};\n\nconst tokenOk = safeEqual(providedToken, expectedToken);\nconst roleOk = approverRole === requiredRole;\nconst actorOk = approverId.length > 0;\nconst withinDeadline = Number.isFinite(deadlineAt) && Date.now() <= deadlineAt;\nconst approved = decision === 'approved' && tokenOk && roleOk && actorOk && withinDeadline;\n\nreturn [{\n  json: {\n    ...$json,\n    approval: approved ? 'approved' : 're-extract',\n    approval_actor: {\n      id: approverId,\n      role: approverRole\n    },\n    approval_validation: {\n      token_ok: tokenOk,\n      role_ok: roleOk,\n      actor_ok: actorOk,\n      within_deadline: withinDeadline\n    }\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-r2-approved",
+      "name": "If R2 Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        6620,
+        -40
+      ],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.approval}}",
+              "value2": "approved"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "save-content-lock",
+      "name": "Save Content Lock",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6890,
+        -100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/content-lock/save",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, content_inventory: $node['Build Content Inventory'].json, status: 'content_locked', approved_by: 'R2' } }}"
+      }
+    },
+    {
+      "id": "trigger-final-build-workflow",
+      "name": "Trigger Final Build Workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        7160,
+        -100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://automation.internal/webhook/hp-final-build",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, content_lock_ready: true, source: 'analysis-worker' } }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-internal-workflow-token",
+              "value": "={{$env.INTERNAL_WORKFLOW_TOKEN}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "increment-r2-reextract-attempt",
+      "name": "Increment R2 Reextract Attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6890,
+        160
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "return [{\n  json: {\n    ...$json,\n    r2_reextract_attempt: Number($json.r2_reextract_attempt || 0) + 1\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-r2-retry-remaining",
+      "name": "If R2 Retry Remaining?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        7160,
+        160
+      ],
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{Number($json.r2_reextract_attempt || 0)}}",
+              "operation": "smaller",
+              "value2": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "log-r2-reextract-requested",
+      "name": "Log R2 Reextract Requested",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        7430,
+        80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, status: 'analysis_running', reason: 'r2_reextract_requested', r2_reextract_attempt: $json.r2_reextract_attempt } }}"
+      }
+    },
+    {
+      "id": "re-extract-content-inventory",
+      "name": "Re-extract Content Inventory",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7700,
+        80
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "return [{\n  json: {\n    ...$node['Build Content Inventory'].json,\n    r2_reextract_attempt: Number($json.r2_reextract_attempt || 0),\n    reextract_requested: true,\n    reextract_at: new Date().toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "mark-r2-retry-exhausted",
+      "name": "Mark R2 Retry Exhausted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        7430,
+        260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, status: 'manual_review_required', reason: 'r2_reextract_retry_exhausted', r2_reextract_attempt: $json.r2_reextract_attempt, approval_validation: $json.approval_validation || null } }}"
+      }
+    },
+    {
+      "id": "log-r1-approval-decision",
+      "name": "Log R1 Approval Decision",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3380,
+        140
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/approvals/audit-log",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, stage: 'R1', decision: $json.approval, actor: $json.approval_actor || null, validation: $json.approval_validation || null, decided_at: new Date().toISOString() } }}"
+      }
+    },
+    {
+      "id": "log-r2-approval-decision",
+      "name": "Log R2 Approval Decision",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6620,
+        -40
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/approvals/audit-log",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Paid Payload'].json.company_id, stage: 'R2', decision: $json.approval, actor: $json.approval_actor || null, validation: $json.approval_validation || null, decided_at: new Date().toISOString() } }}"
+      }
+    },
+    {
+      "id": "if-internal-token-valid-analysis",
+      "name": "If Internal Token Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        680,
+        380
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.internal_token_valid === true}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ignore-unauthorized-analysis-trigger",
+      "name": "Ignore Unauthorized Analysis Trigger",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        950,
+        820
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "return [{ json: { ignored: true, reason: 'unauthorized_internal_trigger', company_id: $json.company_id || null } }];"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Paid Analysis Start": {
+      "main": [
+        [
+          {
+            "node": "Normalize Paid Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Paid Payload": {
+      "main": [
+        [
+          {
+            "node": "If Internal Token Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Paid Trigger Valid?": {
+      "main": [
+        [
+          {
+            "node": "Check Analysis Idempotency",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Invalid Paid Trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Analysis Idempotency": {
+      "main": [
+        [
+          {
+            "node": "Merge Analysis Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Analysis Context": {
+      "main": [
+        [
+          {
+            "node": "If Analysis Event New?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Analysis Event New?": {
+      "main": [
+        [
+          {
+            "node": "Update Status Analysis Running",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore Duplicate Analysis Trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Status Analysis Running": {
+      "main": [
+        [
+          {
+            "node": "Resolve Website",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Website": {
+      "main": [
+        [
+          {
+            "node": "If Website Confidence Pass?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Website Confidence Pass?": {
+      "main": [
+        [
+          {
+            "node": "Issue R1 Approval Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark R1 Manual Review Required",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Issue R1 Approval Challenge": {
+      "main": [
+        [
+          {
+            "node": "Wait R1 Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait R1 Approval": {
+      "main": [
+        [
+          {
+            "node": "Parse R1 Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse R1 Decision": {
+      "main": [
+        [
+          {
+            "node": "Log R1 Approval Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If R1 Approved?": {
+      "main": [
+        [
+          {
+            "node": "Crawl Site",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark R1 Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crawl Site": {
+      "main": [
+        [
+          {
+            "node": "PSI Mobile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PSI Mobile": {
+      "main": [
+        [
+          {
+            "node": "PSI Desktop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PSI Desktop": {
+      "main": [
+        [
+          {
+            "node": "Lighthouse Audit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lighthouse Audit": {
+      "main": [
+        [
+          {
+            "node": "Build Content Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Content Inventory": {
+      "main": [
+        [
+          {
+            "node": "Check Content Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Content Lock": {
+      "main": [
+        [
+          {
+            "node": "If Content Lock OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Content Lock OK?": {
+      "main": [
+        [
+          {
+            "node": "Initialize R2 Reextract Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop Publication (Content Lock Violation)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stop Publication (Content Lock Violation)": {
+      "main": [
+        [
+          {
+            "node": "Mark Content Lock Violation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Initialize R2 Reextract Attempt": {
+      "main": [
+        [
+          {
+            "node": "Issue R2 Approval Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Issue R2 Approval Challenge": {
+      "main": [
+        [
+          {
+            "node": "Wait R2 Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait R2 Approval": {
+      "main": [
+        [
+          {
+            "node": "Parse R2 Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse R2 Decision": {
+      "main": [
+        [
+          {
+            "node": "Log R2 Approval Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If R2 Approved?": {
+      "main": [
+        [
+          {
+            "node": "Save Content Lock",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Increment R2 Reextract Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment R2 Reextract Attempt": {
+      "main": [
+        [
+          {
+            "node": "If R2 Retry Remaining?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If R2 Retry Remaining?": {
+      "main": [
+        [
+          {
+            "node": "Log R2 Reextract Requested",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark R2 Retry Exhausted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log R2 Reextract Requested": {
+      "main": [
+        [
+          {
+            "node": "Re-extract Content Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Re-extract Content Inventory": {
+      "main": [
+        [
+          {
+            "node": "Build Content Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Content Lock": {
+      "main": [
+        [
+          {
+            "node": "Trigger Final Build Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log R1 Approval Decision": {
+      "main": [
+        [
+          {
+            "node": "If R1 Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log R2 Approval Decision": {
+      "main": [
+        [
+          {
+            "node": "If R2 Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Internal Token Valid?": {
+      "main": [
+        [
+          {
+            "node": "If Paid Trigger Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ignore Unauthorized Analysis Trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

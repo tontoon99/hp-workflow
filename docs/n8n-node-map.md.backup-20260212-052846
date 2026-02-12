@@ -1,0 +1,83 @@
+# n8n Node Map
+
+## ingest-workflow
+
+1. `Webhook Intake CSV` (POST `/webhook/hp-intake-csv`)
+2. `Code: Parse CSV Payload`（CSV正規化、company-record準拠へ整形）
+3. `HTTP Request: Upsert Company Record`
+4. `HTTP Request: Create Checkout Session`（比較ページから遷移する決済導線）
+5. `HTTP Request: Create Free Comparison Page`（決済前ラフ3案）
+6. `HTTP Request: Send Preview URL`
+7. `HTTP Request: Update Status Awaiting Payment`
+
+決済前の終端:
+- 無料比較ページ送付まで
+- 有料分析キュー投入なし
+
+## analysis-worker-workflow
+
+1. `Webhook Paid Analysis Start`（Stripeワークフローからのみ受ける）
+2. `Code: Normalize Paid Payload`（`x-internal-workflow-token` 検証）
+3. `IF: If Paid Trigger Valid?`（`paid_trigger=true && internal_token_valid=true`）
+4. `HTTP Request: Check Analysis Idempotency` -> `IF: If Analysis Event New?`
+5. `HTTP Request: Update Status Analysis Running`
+6. `HTTP Request: Resolve Website`
+7. `IF: If Website Confidence Pass?`（`>=0.85`）
+8. `Code: Issue R1 Approval Challenge` -> `Wait R1 Approval` -> `Parse/IF`（トークン/期限/ロール検証）
+9. `HTTP Request: Crawl Site`
+10. `HTTP Request: PSI Mobile`（`url/strategy=mobile/category` 実装）
+11. `HTTP Request: PSI Desktop`（`url/strategy=desktop/category` 実装）
+12. `HTTP Request: Lighthouse Audit`
+13. `Code: Build Content Inventory`
+14. `HTTP Request: Check Content Lock`
+15. `IF: If Content Lock OK?`（違反時 `Stop Publication` + `Mark Content Lock Violation`）
+16. `Code: Issue R2 Approval Challenge` -> `Wait R2 Approval` -> `Parse/IF`（トークン/期限/ロール検証）
+17. `IF: If R2 Retry Remaining?`（上限3） -> `Log R2 Reextract Requested` -> `Re-extract`
+18. `HTTP Request: Save Content Lock`
+19. `HTTP Request: Trigger Final Build Workflow`（内部トークンヘッダー付与）
+
+安全制御:
+- 決済トリガー不正/内部トークン不正時は `manual_review_required`
+- webhook重複は idempotency claim で無害化
+- 低信頼HPは R1へ
+- content lock違反は公開停止
+- R2差し戻しは3回で打ち切り、`manual_review_required`
+
+## build-worker-workflow
+
+1. `Webhook Final Build Start`
+2. `Code: Normalize Final Build Payload`（`content_lock_ready` + 内部トークン検証）
+3. `IF: If Build Trigger Valid?`（無効時 `manual_review_required`）
+4. `HTTP Request: Load Content Inventory`
+5. `Code: Initialize Build Attempt`
+6. `HTTP Request: Update Status Build Running`
+7. `HTTP Request: Build Final Variants`
+8. `HTTP Request: Quality Gate`
+9. `IF: If Quality Passed?`
+10. `IF: If Retry Remaining?` -> `Code: Increment Build Attempt` -> `HTTP Request: Log Build Retry` -> `HTTP Request: Rebuild Variants`
+11. `Code: Issue R3 Approval Challenge` -> `Wait R3 Approval` -> `Parse/IF`（トークン/期限/ロール検証）
+12. `HTTP Request: Create Proposal Bundle`
+13. `Code: Issue R4 Approval Challenge` -> `Wait R4 Approval` -> `Parse/IF`（トークン/期限/ロール検証）
+14. `HTTP Request: Send Proposal Delivery`
+15. `HTTP Request: Mark Sent`
+
+安全制御:
+- 品質NGは再生成へ戻し、上限超過で `quality_failed`
+- R3/R4未承認は送信しない
+- 承認URLの再開要求は approval token と role で検証
+
+## stripe-webhook-workflow
+
+1. `Stripe Webhook`（POST `/webhook/hp-stripe-events`）
+2. `Code: Verify Stripe Signature`（raw body + `Stripe-Signature` + timestamp tolerance）
+3. `Code: Normalize Stripe Event`
+4. `HTTP Request: Check Event Idempotency` -> `IF: If Event New?`
+5. `IF: If Checkout Completed & Paid?`
+6. `IF: If Company Context Present?`
+7. `HTTP Request: Mark Paid Status`
+8. `HTTP Request: Trigger Detailed Analysis Workflow`（`/webhook/hp-paid-analysis` + 内部トークンヘッダー）
+9. `IF: If Payment Failed Event?` -> `Mark Payment Hold`
+10. `IF: If Refund Event?` -> `Stop Published Proposal` -> `Mark Refund Hold`
+
+有料開始条件:
+- `checkout.session.completed` かつ `payment_status=paid` のみ

@@ -1,0 +1,646 @@
+{
+  "name": "hp-workflow-build-worker",
+  "nodes": [
+    {
+      "id": "webhook-final-build-start",
+      "name": "Webhook Final Build Start",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        180,
+        460
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "hp-final-build",
+        "responseMode": "onReceived",
+        "options": {
+          "responseData": "accepted"
+        }
+      }
+    },
+    {
+      "id": "normalize-final-build-payload",
+      "name": "Normalize Final Build Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        450,
+        460
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const body = $json.body ?? {};\nconst companyId = String(body.company_id || '').trim();\nif (!companyId) {\n  throw new Error('company_id is required');\n}\n\nreturn [{\n  json: {\n    company_id: companyId,\n    content_lock_ready: body.content_lock_ready === true || body.content_lock_ready === 'true',\n    trigger_source: String(body.source || 'analysis-worker'),\n    requested_at: new Date().toISOString()\n  }\n}];"
+      }
+    },
+    {
+      "id": "load-content-inventory",
+      "name": "Load Content Inventory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        460
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.internal/content-lock",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "company_id",
+              "value": "={{$node['Normalize Final Build Payload'].json.company_id}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "initialize-build-attempt",
+      "name": "Initialize Build Attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        990,
+        460
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "return [{\n  json: {\n    ...$json,\n    build_attempt: 1\n  }\n}];"
+      }
+    },
+    {
+      "id": "update-status-build-running",
+      "name": "Update Status Build Running",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1260,
+        460
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Final Build Payload'].json.company_id, status: 'build_running', build_attempt: $json.build_attempt } }}"
+      }
+    },
+    {
+      "id": "build-final-variants",
+      "name": "Build Final Variants",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1530,
+        460
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/build-variants",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Final Build Payload'].json.company_id, inventory: $node['Load Content Inventory'].json, mode: 'final', build_attempt: Number($json.build_attempt || $node['Increment Build Attempt']?.json?.build_attempt || $node['Initialize Build Attempt'].json.build_attempt || 1) } }}"
+      }
+    },
+    {
+      "id": "quality-gate",
+      "name": "Quality Gate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        460
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/quality-gate",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Final Build Payload'].json.company_id, variant_bundle: $json, content_lock_required: true, build_attempt: Number($json.build_attempt || $node['Increment Build Attempt']?.json?.build_attempt || $node['Initialize Build Attempt'].json.build_attempt || 1) } }}"
+      }
+    },
+    {
+      "id": "if-quality-passed",
+      "name": "If Quality Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2070,
+        460
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.passed === true}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "if-retry-remaining",
+      "name": "If Retry Remaining?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2340,
+        700
+      ],
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{Number($json.build_attempt || $node['Increment Build Attempt']?.json?.build_attempt || $node['Initialize Build Attempt'].json.build_attempt || 1)}}",
+              "operation": "smaller",
+              "value2": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "increment-build-attempt",
+      "name": "Increment Build Attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2610,
+        620
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const current = Number(\n  $json.build_attempt ||\n  $node['Increment Build Attempt']?.json?.build_attempt ||\n  $node['Initialize Build Attempt'].json.build_attempt ||\n  1\n);\n\nreturn [{\n  json: {\n    ...$json,\n    build_attempt: current + 1\n  }\n}];"
+      }
+    },
+    {
+      "id": "rebuild-variants",
+      "name": "Rebuild Variants",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2880,
+        620
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/build-variants",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Final Build Payload'].json.company_id, inventory: $node['Load Content Inventory'].json, mode: 'rebuild', reason: 'quality_or_r3_rejected', build_attempt: Number($json.build_attempt || $node['Increment Build Attempt']?.json?.build_attempt || $node['Initialize Build Attempt'].json.build_attempt || 1) } }}"
+      }
+    },
+    {
+      "id": "mark-quality-failed",
+      "name": "Mark Quality Failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2610,
+        860
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Final Build Payload'].json.company_id, status: 'quality_failed', reason: 'quality_gate_failed_after_retries' } }}"
+      }
+    },
+    {
+      "id": "wait-r3-approval",
+      "name": "Wait R3 Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2340,
+        340
+      ],
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 48,
+        "resumeUnit": "hours",
+        "options": {
+          "webhookSuffix": "r3-approval"
+        }
+      }
+    },
+    {
+      "id": "parse-r3-decision",
+      "name": "Parse R3 Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2610,
+        340
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const body = $json.body ?? {};\nconst decision = String(body.decision || body.status || $json.decision || '').toLowerCase();\n\nreturn [{\n  json: {\n    ...$json,\n    approval: decision === 'approved' ? 'approved' : 'rebuild'\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-r3-approved",
+      "name": "If R3 Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        340
+      ],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.approval}}",
+              "value2": "approved"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "create-proposal-bundle",
+      "name": "Create Proposal Bundle",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3150,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/proposals/create-bundle",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Final Build Payload'].json.company_id, quality_report: $node['Quality Gate'].json, variants: $node['Build Final Variants'].json } }}"
+      }
+    },
+    {
+      "id": "wait-r4-approval",
+      "name": "Wait R4 Approval",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3420,
+        280
+      ],
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "POST",
+        "responseMode": "lastNode",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 72,
+        "resumeUnit": "hours",
+        "options": {
+          "webhookSuffix": "r4-approval"
+        }
+      }
+    },
+    {
+      "id": "parse-r4-decision",
+      "name": "Parse R4 Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3690,
+        280
+      ],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const body = $json.body ?? {};\nconst decision = String(body.decision || body.status || $json.decision || '').toLowerCase();\n\nreturn [{\n  json: {\n    ...$json,\n    approval: decision === 'approved' ? 'approved' : 'hold'\n  }\n}];"
+      }
+    },
+    {
+      "id": "if-r4-approved",
+      "name": "If R4 Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3960,
+        280
+      ],
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json.approval}}",
+              "value2": "approved"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "send-proposal-delivery",
+      "name": "Send Proposal Delivery",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4230,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/notifications/send-proposal",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Final Build Payload'].json.company_id, proposal_bundle: $node['Create Proposal Bundle'].json, audience: 'paid_only' } }}"
+      }
+    },
+    {
+      "id": "mark-sent",
+      "name": "Mark Sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4500,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Final Build Payload'].json.company_id, status: 'sent', sent_at: new Date().toISOString() } }}"
+      }
+    },
+    {
+      "id": "hold-delivery",
+      "name": "Hold Delivery",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4230,
+        380
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.internal/company-records/status",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ { company_id: $node['Normalize Final Build Payload'].json.company_id, status: 'manual_review_required', reason: 'r4_not_approved' } }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Final Build Start": {
+      "main": [
+        [
+          {
+            "node": "Normalize Final Build Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Final Build Payload": {
+      "main": [
+        [
+          {
+            "node": "Load Content Inventory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Content Inventory": {
+      "main": [
+        [
+          {
+            "node": "Initialize Build Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Initialize Build Attempt": {
+      "main": [
+        [
+          {
+            "node": "Update Status Build Running",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Status Build Running": {
+      "main": [
+        [
+          {
+            "node": "Build Final Variants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Final Variants": {
+      "main": [
+        [
+          {
+            "node": "Quality Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quality Gate": {
+      "main": [
+        [
+          {
+            "node": "If Quality Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Quality Passed?": {
+      "main": [
+        [
+          {
+            "node": "Wait R3 Approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "If Retry Remaining?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait R3 Approval": {
+      "main": [
+        [
+          {
+            "node": "Parse R3 Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse R3 Decision": {
+      "main": [
+        [
+          {
+            "node": "If R3 Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If R3 Approved?": {
+      "main": [
+        [
+          {
+            "node": "Create Proposal Bundle",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "If Retry Remaining?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Retry Remaining?": {
+      "main": [
+        [
+          {
+            "node": "Increment Build Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Quality Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Increment Build Attempt": {
+      "main": [
+        [
+          {
+            "node": "Rebuild Variants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rebuild Variants": {
+      "main": [
+        [
+          {
+            "node": "Quality Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Proposal Bundle": {
+      "main": [
+        [
+          {
+            "node": "Wait R4 Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait R4 Approval": {
+      "main": [
+        [
+          {
+            "node": "Parse R4 Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse R4 Decision": {
+      "main": [
+        [
+          {
+            "node": "If R4 Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If R4 Approved?": {
+      "main": [
+        [
+          {
+            "node": "Send Proposal Delivery",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hold Delivery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Proposal Delivery": {
+      "main": [
+        [
+          {
+            "node": "Mark Sent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false
+}

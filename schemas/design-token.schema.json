@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hp-workflow.local/schemas/design-token.schema.json",
+  "title": "Design Token",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "variant",
+    "theme",
+    "typography",
+    "layout"
+  ],
+  "properties": {
+    "variant": {
+      "type": "string",
+      "enum": [
+        "trust",
+        "modern",
+        "friendly"
+      ]
+    },
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "color_primary",
+        "color_bg",
+        "color_text"
+      ],
+      "properties": {
+        "color_primary": {
+          "type": "string",
+          "pattern": "^#([A-Fa-f0-9]{6})$"
+        },
+        "color_bg": {
+          "type": "string",
+          "pattern": "^#([A-Fa-f0-9]{6})$"
+        },
+        "color_text": {
+          "type": "string",
+          "pattern": "^#([A-Fa-f0-9]{6})$"
+        },
+        "radius": {
+          "type": "string"
+        }
+      }
+    },
+    "typography": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "heading_font",
+        "body_font",
+        "scale"
+      ],
+      "properties": {
+        "heading_font": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_font": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scale": {
+          "type": "array",
+          "minItems": 3,
+          "items": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_width",
+        "spacing_step",
+        "hero_style"
+      ],
+      "properties": {
+        "max_width": {
+          "type": "number",
+          "minimum": 960
+        },
+        "spacing_step": {
+          "type": "number",
+          "minimum": 4
+        },
+        "hero_style": {
+          "type": "string",
+          "enum": [
+            "conservative",
+            "dynamic",
+            "story"
+          ]
+        }
+      }
+    }
+  }
+}

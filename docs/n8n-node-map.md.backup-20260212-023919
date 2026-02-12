@@ -1,0 +1,74 @@
+# n8n Node Map
+
+## ingest-workflow
+
+1. `Webhook Intake CSV` (POST `/webhook/hp-intake-csv`)
+2. `Code: Parse CSV Payload`（CSV正規化、company-record準拠へ整形）
+3. `HTTP Request: Upsert Company Record`
+4. `HTTP Request: Create Checkout Session`（比較ページから遷移する決済導線）
+5. `HTTP Request: Create Free Comparison Page`（決済前ラフ3案）
+6. `HTTP Request: Send Preview URL`
+7. `HTTP Request: Update Status Awaiting Payment`
+
+決済前の終端:
+- 無料比較ページ送付まで
+- 有料分析キュー投入なし
+
+## analysis-worker-workflow
+
+1. `Webhook Paid Analysis Start`（Stripeワークフローからのみ受ける）
+2. `Code: Normalize Paid Payload`
+3. `IF: If Paid Trigger Valid?`（`paid_trigger=true` 必須）
+4. `HTTP Request: Update Status Analysis Running`
+5. `HTTP Request: Resolve Website`
+6. `IF: If Website Confidence Pass?`（`>=0.85`）
+7. `Wait: Wait R1 Approval` + `Code/IF`（R1承認ゲート）
+8. `HTTP Request: Crawl Site`
+9. `HTTP Request: PSI Mobile`（`url/strategy=mobile/category` 実装）
+10. `HTTP Request: PSI Desktop`（`url/strategy=desktop/category` 実装）
+11. `HTTP Request: Lighthouse Audit`
+12. `Code: Build Content Inventory`
+13. `HTTP Request: Check Content Lock`
+14. `IF: If Content Lock OK?`（違反時 `Stop Publication`）
+15. `Wait: Wait R2 Approval` + `Code/IF`（R2承認ゲート）
+16. `HTTP Request: Save Content Lock`
+17. `HTTP Request: Trigger Final Build Workflow`
+
+安全制御:
+- 決済トリガー不正時は `manual_review_required`
+- 低信頼HPは R1へ
+- content lock違反は公開停止
+
+## build-worker-workflow
+
+1. `Webhook Final Build Start`
+2. `Code: Normalize Final Build Payload`
+3. `HTTP Request: Load Content Inventory`
+4. `Code: Initialize Build Attempt`
+5. `HTTP Request: Update Status Build Running`
+6. `HTTP Request: Build Final Variants`
+7. `HTTP Request: Quality Gate`
+8. `IF: If Quality Passed?`
+9. `IF: If Retry Remaining?` -> `Code: Increment Build Attempt` -> `HTTP Request: Rebuild Variants`（再生成ループ）
+10. `Wait: Wait R3 Approval` + `Code/IF`（R3承認）
+11. `HTTP Request: Create Proposal Bundle`
+12. `Wait: Wait R4 Approval` + `Code/IF`（R4承認）
+13. `HTTP Request: Send Proposal Delivery`
+14. `HTTP Request: Mark Sent`
+
+安全制御:
+- 品質NGは再生成へ戻し、上限超過で `quality_failed`
+- R3/R4未承認は送信しない
+
+## stripe-webhook-workflow
+
+1. `Stripe Webhook`（POST `/webhook/hp-stripe-events`）
+2. `Code: Normalize Stripe Event`
+3. `IF: If Checkout Completed & Paid?`
+4. `HTTP Request: Mark Paid Status`
+5. `HTTP Request: Trigger Detailed Analysis Workflow`（`/webhook/hp-paid-analysis`）
+6. `IF: If Payment Failed Event?` -> `Mark Payment Hold`
+7. `IF: If Refund Event?` -> `Stop Published Proposal`
+
+有料開始条件:
+- `checkout.session.completed` かつ `payment_status=paid` のみ

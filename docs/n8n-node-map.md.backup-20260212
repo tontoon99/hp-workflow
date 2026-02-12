@@ -1,0 +1,45 @@
+# n8n Node Map
+
+## ingest-workflow
+
+1. `Cron` or `Webhook`
+2. `Read Binary File` or `Webhook Body`
+3. `Code` (CSV parse + normalize)
+4. `HTTP Request` (upsert company record)
+5. `IF` (duplicate check)
+6. `HTTP Request` (enqueue preview generation job)
+7. `HTTP Request` (create preview comparison page)
+8. `HTTP Request` (send preview URL)
+9. `Webhook` (Stripe checkout.session.completed)
+10. `HTTP Request` (enqueue detailed analysis job)
+11. `Data Store` (status writeback)
+
+## analysis-worker-workflow
+
+1. `Queue Trigger` (detailed_analysis_queue)
+2. `HTTP Request` (resolve website candidates)
+3. `IF` confidence check
+4. `Manual Approval` (R1 HP特定レビュー)
+5. `HTTP Request` (crawl snapshot)
+6. `HTTP Request` (PSI API mobile)
+7. `HTTP Request` (PSI API desktop)
+8. `HTTP Request` (Lighthouse runner service)
+9. `Code` (content inventory build)
+10. `Manual Approval` (R2 content lockレビュー)
+11. `HTTP Request` (persist content lock)
+12. `HTTP Request` (enqueue build_queue)
+
+## build-worker-workflow
+
+1. `Queue Trigger` (build_queue)
+2. `HTTP Request` (load content inventory)
+3. `Code` (variant brief + token request payload)
+4. `Anthropic` or `HTTP Request` (LLM for briefs/tokens)
+5. `HTTP Request` (template build service)
+6. `HTTP Request` (quality gate service)
+7. `IF` quality pass
+8. `HTTP Request` (auto-fix + rebuild when fail)
+9. `Manual Approval` (R3提案品質レビュー)
+10. `HTTP Request` (proposal bundle create)
+11. `Manual Approval` (R4送信レビュー)
+12. `HTTP Request` (enqueue delivery_queue)
